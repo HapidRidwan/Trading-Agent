@@ -1,6 +1,0 @@
-{
-  "/page": "app/page.js",
-  "/api/market/route": "app/api/market/route.js",
-  "/api/news/route": "app/api/news/route.js",
-  "/api/tick/route": "app/api/tick/route.js"
-}

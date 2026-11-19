@@ -189,16 +189,17 @@ export default function Home() {
     }
   }, []);
 
-  // Initial fetch and auto-refresh intervals with 10-second polling & clean AbortController
+  // Initial fetch and auto-refresh intervals with live 3s polling (YahooFinance/Simulator) & clean AbortController
   useEffect(() => {
     const controller = new AbortController();
     fetchMarketData(pair, timeframe, controller.signal);
     fetchNewsData();
 
-    // Refresh active candle tick every 10 seconds (preserves API quotas)
+    // Fast 3-second live refresh for YahooFinance/Simulator, 8s for TwelveData
+    const intervalMs = dataSource === 'YahooFinance' || dataSource === 'Simulator' ? 3000 : 8000;
     const marketInterval = setInterval(() => {
       fetchMarketData(pair, timeframe, controller.signal);
-    }, 10000);
+    }, intervalMs);
 
     // Refresh news every 30 seconds
     const newsInterval = setInterval(() => {
@@ -210,7 +211,7 @@ export default function Home() {
       clearInterval(marketInterval);
       clearInterval(newsInterval);
     };
-  }, [fetchMarketData, fetchNewsData, pair, timeframe]);
+  }, [fetchMarketData, fetchNewsData, pair, timeframe, dataSource]);
 
   // Execute AI Analysis
   const runAIAnalysis = async (autoTriggered = false) => {

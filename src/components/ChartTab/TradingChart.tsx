@@ -89,6 +89,8 @@ export default function TradingChart({
   const ema50SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const priceLinesRef = useRef<any[]>([]);
   const userDrawingsRef = useRef<any[]>([]);
+  const lastPairTfRef = useRef<string>('');
+  const prevCandlesLengthRef = useRef<number>(0);
 
   const [showIndicators, setShowIndicators] = useState(true);
   const [showLevels, setShowLevels] = useState(true);
@@ -290,9 +292,13 @@ export default function TradingChart({
     (window as any).__activeTradingTool = activeTool;
   }, [activeTool]);
 
-  // Update candle data & indicators
+  // Update candle data & indicators with smooth real-time tick streaming (chart.updateData)
   useEffect(() => {
     if (!candleSeriesRef.current || !volumeSeriesRef.current || candles.length === 0) return;
+
+    const currentKey = `${pair}_${timeframe}`;
+    const isPairOrTfChange = lastPairTfRef.current !== currentKey;
+    const isInitialLoad = prevCandlesLengthRef.current === 0;
 
     // Format candles for lightweight-charts
     const chartCandles: CandlestickData<Time>[] = candles.map((c) => ({
@@ -309,10 +315,7 @@ export default function TradingChart({
       color: c.close >= c.open ? 'rgba(63, 185, 80, 0.25)' : 'rgba(248, 81, 73, 0.25)',
     }));
 
-    candleSeriesRef.current.setData(chartCandles);
-    volumeSeriesRef.current.setData(chartVolumes);
-
-    // Calculate & set EMAs
+    // Calculate EMAs
     const closes = candles.map((c) => c.close);
     const ema20Values = calculateEMA(closes, 20);
     const ema50Values = calculateEMA(closes, 50);
@@ -329,12 +332,34 @@ export default function TradingChart({
       }
     }
 
-    if (ema20SeriesRef.current) {
-      ema20SeriesRef.current.setData(showIndicators ? ema20Data : []);
+    // Incremental Real-Time Live Tick Injection vs Full Reset
+    if (isPairOrTfChange || isInitialLoad || Math.abs(candles.length - prevCandlesLengthRef.current) > 1) {
+      // Full dataset initialization on symbol/timeframe switch
+      candleSeriesRef.current.setData(chartCandles);
+      volumeSeriesRef.current.setData(chartVolumes);
+      if (ema20SeriesRef.current) {
+        ema20SeriesRef.current.setData(showIndicators ? ema20Data : []);
+      }
+      if (ema50SeriesRef.current) {
+        ema50SeriesRef.current.setData(showIndicators ? ema50Data : []);
+      }
+      lastPairTfRef.current = currentKey;
+    } else {
+      // Smooth real-time update: update latest candle and EMAs without reloading chart canvas
+      const latestCandle = chartCandles[chartCandles.length - 1];
+      const latestVolume = chartVolumes[chartVolumes.length - 1];
+      candleSeriesRef.current.update(latestCandle);
+      volumeSeriesRef.current.update(latestVolume);
+
+      if (showIndicators) {
+        const lastEma20 = ema20Data[ema20Data.length - 1];
+        const lastEma50 = ema50Data[ema50Data.length - 1];
+        if (lastEma20 && ema20SeriesRef.current) ema20SeriesRef.current.update(lastEma20);
+        if (lastEma50 && ema50SeriesRef.current) ema50SeriesRef.current.update(lastEma50);
+      }
     }
-    if (ema50SeriesRef.current) {
-      ema50SeriesRef.current.setData(showIndicators ? ema50Data : []);
-    }
+
+    prevCandlesLengthRef.current = candles.length;
 
     // Default legend to latest candle
     const last = candles[candles.length - 1];
@@ -350,7 +375,7 @@ export default function TradingChart({
       ema50: !isNaN(lastEma50) ? lastEma50 : undefined,
       isUp: last.close >= last.open,
     });
-  }, [candles, showIndicators]);
+  }, [candles, showIndicators, pair, timeframe]);
 
   // Update Trade Setup Price Lines (Entry, SL, TP 1, TP 2) with exact decimal precision
   useEffect(() => {

@@ -24,34 +24,16 @@ function getCacheTTL(timeframe: Timeframe): number {
     case '15m':
       return 3 * 60 * 1000; // 3 minutes
     case '5m':
+      return 15 * 1000; // 15 seconds
     case '1m':
     default:
-      return 15 * 1000; // 15 seconds (prevents rate limits on free tiers)
+      return 2 * 1000; // 2 seconds (Live real-time tick streaming for M1 scalping)
   }
 }
 
 // ============================================================================
 // 1. TWELVE DATA HELPERS
 // ============================================================================
-function getTwelveDataSymbol(pair: SupportedPair): string {
-  switch (pair) {
-    case 'XAU/USD':
-      return 'XAU/USD';
-    case 'EUR/USD':
-      return 'EUR/USD';
-    case 'GBP/USD':
-      return 'GBPUSD';
-    case 'USD/JPY':
-      return 'USD/JPY';
-    case 'AUD/USD':
-      return 'AUD/USD';
-    case 'BTC/USD':
-      return 'BTC/USD';
-    default:
-      return 'XAU/USD';
-  }
-}
-
 function getTwelveDataInterval(tf: Timeframe): string {
   switch (tf) {
     case '1m':
@@ -78,9 +60,10 @@ async function fetchFromTwelveData(
   apiKey: string
 ): Promise<Candle[] | null> {
   try {
-    const symbol = getTwelveDataSymbol(pair);
-    const interval = getTwelveDataInterval(timeframe);
-    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${count}&apikey=${apiKey}`;
+    const tdInterval = getTwelveDataInterval(timeframe);
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(
+      pair
+    )}&interval=${tdInterval}&outputsize=${count}&apikey=${apiKey}`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4500);
@@ -103,6 +86,7 @@ async function fetchFromTwelveData(
 
     if (
       json.status === 'error' ||
+      json.code === 401 ||
       json.code === 429 ||
       !json.values ||
       !Array.isArray(json.values) ||
@@ -136,12 +120,12 @@ async function fetchFromTwelveData(
 }
 
 // ============================================================================
-// 2. YAHOO FINANCE CHART API (GRATIS TANPA API KEY, 100% STABIL)
+// 2. YAHOO FINANCE CHART API (GRATIS TANPA API KEY, 100% STABIL + LIVE TICK)
 // ============================================================================
 function getYahooFinanceSymbol(pair: SupportedPair): string {
   switch (pair) {
     case 'XAU/USD':
-      return 'GC=F'; // Gold Continuous Futures
+      return 'GC=F'; // Gold Continuous Futures (sangat aktif dan real-time)
     case 'EUR/USD':
       return 'EURUSD=X';
     case 'GBP/USD':
@@ -180,7 +164,7 @@ async function fetchFromYahooFinance(
   pair: SupportedPair,
   timeframe: Timeframe,
   count: number
-): Promise<Candle[] | null> {
+): Promise<{ candles: Candle[]; regularMarketPrice?: number } | null> {
   try {
     const symbol = getYahooFinanceSymbol(pair);
     const { interval, range } = getYahooFinanceIntervalAndRange(timeframe);
@@ -256,7 +240,21 @@ async function fetchFromYahooFinance(
 
     // Sort chronologically ascending and slice to requested count
     candles.sort((a, b) => a.time - b.time);
-    return candles.slice(-count);
+    const sliced = candles.slice(-count);
+
+    // LIVE TICK INJECTION: Inject real-time regularMarketPrice directly into the latest candle
+    const regularMarketPrice = result.meta?.regularMarketPrice;
+    if (regularMarketPrice && typeof regularMarketPrice === 'number' && sliced.length > 0) {
+      const last = sliced[sliced.length - 1];
+      last.close = regularMarketPrice;
+      last.high = Math.max(last.high, regularMarketPrice);
+      last.low = Math.min(last.low, regularMarketPrice);
+    }
+
+    return {
+      candles: sliced,
+      regularMarketPrice: typeof regularMarketPrice === 'number' ? regularMarketPrice : undefined,
+    };
   } catch (err: any) {
     console.warn('[YahooFinance] Fetch exception:', err.message);
     return null;
@@ -346,22 +344,30 @@ async function executeFetchMarket(
   let spreadPips = config.defaultSpreadPips;
 
   // ------------------------------------------------------------------------
-  // PRIORITAS 1: Twelve Data (TWELVEDATA_API_KEY)
+  // PRIORITAS 1: Twelve Data (TWELVEDATA_API_KEY / TWELVE_DATA_API_KEY)
   // ------------------------------------------------------------------------
-  const twelveDataKey = process.env.TWELVEDATA_API_KEY;
-  if (twelveDataKey && twelveDataKey.trim() !== '') {
-    candles = await fetchFromTwelveData(pair, timeframe, count, twelveDataKey.trim());
+  const tdKey = (process.env.TWELVEDATA_API_KEY || process.env.TWELVE_DATA_API_KEY || '')
+    .replace(/['"]/g, '')
+    .trim();
+
+  console.log(`[TwelveData] Key loaded: ${tdKey ? 'YA (' + tdKey.slice(0, 4) + '***)' : 'KOSONG'}`);
+
+  if (tdKey !== '') {
+    candles = await fetchFromTwelveData(pair, timeframe, count, tdKey);
     if (candles && candles.length > 0) {
       activeSource = 'TwelveData';
+      currentPrice = candles[candles.length - 1].close;
     }
   }
 
   // ------------------------------------------------------------------------
-  // PRIORITAS 2: Yahoo Finance Chart API (Gratis Tanpa API Key, 100% Stabil)
+  // PRIORITAS 2: Yahoo Finance Chart API (GC=F untuk Gold, Live Tick Injection)
   // ------------------------------------------------------------------------
   if (!candles || candles.length === 0) {
-    candles = await fetchFromYahooFinance(pair, timeframe, count);
-    if (candles && candles.length > 0) {
+    const yfResult = await fetchFromYahooFinance(pair, timeframe, count);
+    if (yfResult && yfResult.candles.length > 0) {
+      candles = yfResult.candles;
+      currentPrice = yfResult.regularMarketPrice ?? candles[candles.length - 1].close;
       activeSource = 'YahooFinance';
     }
   }
@@ -370,11 +376,12 @@ async function executeFetchMarket(
   // PRIORITAS 3: FCS API (FCSAPI_KEY) — Cadangan Ketiga
   // ------------------------------------------------------------------------
   if (!candles || candles.length === 0) {
-    const fcsKey = process.env.FCSAPI_KEY;
-    if (fcsKey && fcsKey.trim() !== '') {
-      candles = await fetchFromFCSAPI(pair, timeframe, count, fcsKey.trim());
+    const fcsKey = (process.env.FCSAPI_KEY || '').replace(/['"]/g, '').trim();
+    if (fcsKey !== '') {
+      candles = await fetchFromFCSAPI(pair, timeframe, count, fcsKey);
       if (candles && candles.length > 0) {
         activeSource = 'FCSAPI';
+        currentPrice = candles[candles.length - 1].close;
       }
     }
   }
@@ -389,7 +396,7 @@ async function executeFetchMarket(
     spreadPips = simulated.spreadPips;
     marketPhase = simulated.marketPhase;
     activeSource = 'Simulator';
-  } else {
+  } else if (!currentPrice && candles.length > 0) {
     currentPrice = candles[candles.length - 1].close;
   }
 

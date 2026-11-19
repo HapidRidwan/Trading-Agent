@@ -71,6 +71,7 @@ export default function Home() {
   const [marketPhase, setMarketPhase] = useState<string>('TRENDING_BULL');
   const [dataSource, setDataSource] = useState<string>('Simulator');
   const [isLoadingMarket, setIsLoadingMarket] = useState<boolean>(false);
+  const [liveTick, setLiveTick] = useState<{ midPrice: number; timestamp: number } | null>(null);
 
   // Economic News & Sessions State
   const [newsEvents, setNewsEvents] = useState<EconomicNewsEvent[]>([]);
@@ -189,17 +190,44 @@ export default function Home() {
     }
   }, []);
 
-  // Initial fetch and auto-refresh intervals with live 3s polling (YahooFinance/Simulator) & clean AbortController
+  // Fetch 1-Second Live Tick from Swissquote (/api/tick)
+  const fetchLiveTick = useCallback(async (p: SupportedPair = pair, signal?: AbortSignal) => {
+    try {
+      const res = await fetch(`/api/tick?pair=${encodeURIComponent(p)}`, { signal });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.midPrice && typeof data.midPrice === 'number') {
+          setCurrentPrice(data.midPrice);
+          if (data.spreadPips) setSpreadPips(data.spreadPips);
+          setLiveTick({ midPrice: data.midPrice, timestamp: data.timestamp || Date.now() });
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        // silent catch
+      }
+    }
+  }, [pair]);
+
+  // Hybrid Polling Architecture:
+  // 1. Full candle fetch (/api/market) every 45s (strictly saves Twelve Data 8 req/min quota)
+  // 2. Ultra-fast live tick fetch (/api/tick) every 1s (Swissquote live feed for real-time wick/body motion)
+  // 3. News refresh every 30s
   useEffect(() => {
     const controller = new AbortController();
     fetchMarketData(pair, timeframe, controller.signal);
+    fetchLiveTick(pair, controller.signal);
     fetchNewsData();
 
-    // Fast 3-second live refresh for YahooFinance/Simulator, 8s for TwelveData
-    const intervalMs = dataSource === 'YahooFinance' || dataSource === 'Simulator' ? 3000 : 8000;
+    // Full candle sync every 45s (preserves Twelve Data 8 req/min quota)
     const marketInterval = setInterval(() => {
       fetchMarketData(pair, timeframe, controller.signal);
-    }, intervalMs);
+    }, 45000);
+
+    // 1-Second Live Tick Stream from Swissquote for intra-candle tick movement
+    const tickInterval = setInterval(() => {
+      fetchLiveTick(pair, controller.signal);
+    }, 1000);
 
     // Refresh news every 30 seconds
     const newsInterval = setInterval(() => {
@@ -209,9 +237,10 @@ export default function Home() {
     return () => {
       controller.abort();
       clearInterval(marketInterval);
+      clearInterval(tickInterval);
       clearInterval(newsInterval);
     };
-  }, [fetchMarketData, fetchNewsData, pair, timeframe, dataSource]);
+  }, [fetchMarketData, fetchLiveTick, fetchNewsData, pair, timeframe]);
 
   // Execute AI Analysis
   const runAIAnalysis = async (autoTriggered = false) => {
@@ -490,16 +519,21 @@ export default function Home() {
                   supplyDemandZones={analysis?.chartAnnotations?.supplyDemandZones || []}
                   spreadPips={spreadPips}
                   currentPrice={currentPrice}
+                  liveTick={liveTick}
                   dataSource={dataSource}
                   onPairChange={(newPair) => {
                     setPair(newPair);
                     fetchMarketData(newPair, timeframe);
+                    fetchLiveTick(newPair);
                   }}
                   onTimeframeChange={(newTf) => {
                     setTimeframe(newTf);
                     fetchMarketData(pair, newTf);
                   }}
-                  onRefresh={() => fetchMarketData(pair, timeframe)}
+                  onRefresh={() => {
+                    fetchMarketData(pair, timeframe);
+                    fetchLiveTick(pair);
+                  }}
                   isLoading={isLoadingMarket}
                   onShowToast={showQuickToast}
                 />
@@ -542,16 +576,21 @@ export default function Home() {
                 supplyDemandZones={analysis?.chartAnnotations?.supplyDemandZones || []}
                 spreadPips={spreadPips}
                 currentPrice={currentPrice}
+                liveTick={liveTick}
                 dataSource={dataSource}
                 onPairChange={(newPair) => {
                   setPair(newPair);
                   fetchMarketData(newPair, timeframe);
+                  fetchLiveTick(newPair);
                 }}
                 onTimeframeChange={(newTf) => {
                   setTimeframe(newTf);
                   fetchMarketData(pair, newTf);
                 }}
-                onRefresh={() => fetchMarketData(pair, timeframe)}
+                onRefresh={() => {
+                  fetchMarketData(pair, timeframe);
+                  fetchLiveTick(pair);
+                }}
                 isLoading={isLoadingMarket}
                 onShowToast={showQuickToast}
               />

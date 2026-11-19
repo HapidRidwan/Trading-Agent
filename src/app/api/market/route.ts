@@ -24,15 +24,78 @@ function getCacheTTL(timeframe: Timeframe): number {
     case '15m':
       return 3 * 60 * 1000; // 3 minutes
     case '5m':
-      return 15 * 1000; // 15 seconds
     case '1m':
     default:
-      return 2 * 1000; // 2 seconds (Live real-time tick streaming for M1 scalping)
+      return 30 * 1000; // 30 seconds (Protects Twelve Data quota: max 2 calls/min vs 8/min limit)
   }
 }
 
 // ============================================================================
-// 1. TWELVE DATA HELPERS
+// 1. SWISSQUOTE LIVE INSTITUTIONAL FEED (GRATIS, TANPA KEY, REAL-TIME 1 DETIK)
+// ============================================================================
+export interface SwissquoteLiveQuote {
+  bid: number;
+  ask: number;
+  midPrice: number;
+  spreadPips: number;
+}
+
+async function fetchSwissquoteLiveQuote(pair: SupportedPair): Promise<SwissquoteLiveQuote | null> {
+  try {
+    const parts = pair.split('/');
+    if (parts.length !== 2) return null;
+    const base = parts[0];
+    const quote = parts[1];
+
+    const url = `https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/${encodeURIComponent(
+      base
+    )}/${encodeURIComponent(quote)}?_t=${Date.now()}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+      },
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    if (!Array.isArray(json) || json.length === 0) return null;
+
+    const profiles = json[0]?.spreadProfilePrices;
+    if (!Array.isArray(profiles) || profiles.length === 0) return null;
+
+    const item = profiles[0];
+    const bid = typeof item.bid === 'number' ? item.bid : parseFloat(item.bid);
+    const ask = typeof item.ask === 'number' ? item.ask : parseFloat(item.ask);
+
+    if (isNaN(bid) || isNaN(ask) || bid <= 0 || ask <= 0) return null;
+
+    const midPrice = (bid + ask) / 2;
+    const config = PAIR_CONFIGS[pair] || PAIR_CONFIGS['XAU/USD'];
+    const spreadPips = Number(((ask - bid) / config.pipSize).toFixed(1));
+
+    return {
+      bid,
+      ask,
+      midPrice,
+      spreadPips: Math.max(0.1, spreadPips),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
+// 2. TWELVE DATA HELPERS
 // ============================================================================
 function getTwelveDataInterval(tf: Timeframe): string {
   switch (tf) {
@@ -120,7 +183,7 @@ async function fetchFromTwelveData(
 }
 
 // ============================================================================
-// 2. YAHOO FINANCE CHART API (GRATIS TANPA API KEY, 100% STABIL + LIVE TICK)
+// 3. YAHOO FINANCE CHART API (GRATIS TANPA API KEY, CACHE-BUSTER NO-CACHE)
 // ============================================================================
 function getYahooFinanceSymbol(pair: SupportedPair): string {
   switch (pair) {
@@ -168,9 +231,10 @@ async function fetchFromYahooFinance(
   try {
     const symbol = getYahooFinanceSymbol(pair);
     const { interval, range } = getYahooFinanceIntervalAndRange(timeframe);
+    // Cache-buster parameter &_t=${Date.now()} to prevent stale cache responses
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
       symbol
-    )}?interval=${interval}&range=${range}`;
+    )}?interval=${interval}&range=${range}&_t=${Date.now()}`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4500);
@@ -180,6 +244,8 @@ async function fetchFromYahooFinance(
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
       },
     });
     clearTimeout(timeoutId);
@@ -242,14 +308,8 @@ async function fetchFromYahooFinance(
     candles.sort((a, b) => a.time - b.time);
     const sliced = candles.slice(-count);
 
-    // LIVE TICK INJECTION: Inject real-time regularMarketPrice directly into the latest candle
+    // Live price from Yahoo Finance meta
     const regularMarketPrice = result.meta?.regularMarketPrice;
-    if (regularMarketPrice && typeof regularMarketPrice === 'number' && sliced.length > 0) {
-      const last = sliced[sliced.length - 1];
-      last.close = regularMarketPrice;
-      last.high = Math.max(last.high, regularMarketPrice);
-      last.low = Math.min(last.low, regularMarketPrice);
-    }
 
     return {
       candles: sliced,
@@ -262,7 +322,7 @@ async function fetchFromYahooFinance(
 }
 
 // ============================================================================
-// 3. FCS API HELPERS
+// 4. FCS API HELPERS
 // ============================================================================
 async function fetchFromFCSAPI(
   pair: SupportedPair,
@@ -328,7 +388,7 @@ async function fetchFromFCSAPI(
 }
 
 // ============================================================================
-// CORE DATA FETCH PIPELINE WITH MULTI-PROVIDER AUTO-FAILOVER
+// CORE DATA FETCH PIPELINE WITH SWISSQUOTE LIVE TICK INJECTION
 // ============================================================================
 async function executeFetchMarket(
   pair: SupportedPair,
@@ -342,6 +402,9 @@ async function executeFetchMarket(
   let marketPhase = 'REAL_MARKET';
   let currentPrice = 0;
   let spreadPips = config.defaultSpreadPips;
+
+  // Fetch Swissquote Live Institutional Quote (Real-time Bid/Ask/Mid & Spread)
+  const sqQuote = await fetchSwissquoteLiveQuote(pair);
 
   // ------------------------------------------------------------------------
   // PRIORITAS 1: Twelve Data (TWELVEDATA_API_KEY / TWELVE_DATA_API_KEY)
@@ -357,18 +420,46 @@ async function executeFetchMarket(
     if (candles && candles.length > 0) {
       activeSource = 'TwelveData';
       currentPrice = candles[candles.length - 1].close;
+      if (sqQuote) {
+        const last = candles[candles.length - 1];
+        last.close = sqQuote.midPrice;
+        last.high = Math.max(last.high, sqQuote.midPrice);
+        last.low = Math.min(last.low, sqQuote.midPrice);
+        currentPrice = sqQuote.midPrice;
+        spreadPips = sqQuote.spreadPips;
+      }
     }
   }
 
   // ------------------------------------------------------------------------
-  // PRIORITAS 2: Yahoo Finance Chart API (GC=F untuk Gold, Live Tick Injection)
+  // PRIORITAS 2: Yahoo Finance Historical Candles + Swissquote Live Tick
   // ------------------------------------------------------------------------
   if (!candles || candles.length === 0) {
     const yfResult = await fetchFromYahooFinance(pair, timeframe, count);
     if (yfResult && yfResult.candles.length > 0) {
       candles = yfResult.candles;
-      currentPrice = yfResult.regularMarketPrice ?? candles[candles.length - 1].close;
-      activeSource = 'YahooFinance';
+
+      // Injeksi Live Tick dari Swissquote jika tersedia
+      if (sqQuote) {
+        const last = candles[candles.length - 1];
+        last.close = sqQuote.midPrice;
+        last.high = Math.max(last.high, sqQuote.midPrice);
+        last.low = Math.min(last.low, sqQuote.midPrice);
+        currentPrice = sqQuote.midPrice;
+        spreadPips = sqQuote.spreadPips;
+        activeSource = 'Swissquote Live';
+      } else {
+        if (yfResult.regularMarketPrice) {
+          const last = candles[candles.length - 1];
+          last.close = yfResult.regularMarketPrice;
+          last.high = Math.max(last.high, yfResult.regularMarketPrice);
+          last.low = Math.min(last.low, yfResult.regularMarketPrice);
+          currentPrice = yfResult.regularMarketPrice;
+        } else {
+          currentPrice = candles[candles.length - 1].close;
+        }
+        activeSource = 'YahooFinance';
+      }
     }
   }
 
@@ -380,8 +471,18 @@ async function executeFetchMarket(
     if (fcsKey !== '') {
       candles = await fetchFromFCSAPI(pair, timeframe, count, fcsKey);
       if (candles && candles.length > 0) {
-        activeSource = 'FCSAPI';
-        currentPrice = candles[candles.length - 1].close;
+        if (sqQuote) {
+          const last = candles[candles.length - 1];
+          last.close = sqQuote.midPrice;
+          last.high = Math.max(last.high, sqQuote.midPrice);
+          last.low = Math.min(last.low, sqQuote.midPrice);
+          currentPrice = sqQuote.midPrice;
+          spreadPips = sqQuote.spreadPips;
+          activeSource = 'Swissquote Live';
+        } else {
+          activeSource = 'FCSAPI';
+          currentPrice = candles[candles.length - 1].close;
+        }
       }
     }
   }
@@ -396,6 +497,17 @@ async function executeFetchMarket(
     spreadPips = simulated.spreadPips;
     marketPhase = simulated.marketPhase;
     activeSource = 'Simulator';
+
+    // Even on simulator, inject real Swissquote mid price & spread if available!
+    if (sqQuote && candles.length > 0) {
+      const last = candles[candles.length - 1];
+      last.close = sqQuote.midPrice;
+      last.high = Math.max(last.high, sqQuote.midPrice);
+      last.low = Math.min(last.low, sqQuote.midPrice);
+      currentPrice = sqQuote.midPrice;
+      spreadPips = sqQuote.spreadPips;
+      activeSource = 'Swissquote Live';
+    }
   } else if (!currentPrice && candles.length > 0) {
     currentPrice = candles[candles.length - 1].close;
   }
@@ -413,7 +525,7 @@ async function executeFetchMarket(
 }
 
 // ============================================================================
-// MAIN GET HANDLER WITH IN-FLIGHT DEDUPLICATION & SMART CACHING
+// MAIN GET HANDLER WITH IN-FLIGHT DEDUPLICATION & SMART CACHING (1s for 1m)
 // ============================================================================
 export async function GET(req: NextRequest) {
   try {
@@ -443,7 +555,7 @@ export async function GET(req: NextRequest) {
     const fetchPromise = (async () => {
       try {
         const result = await executeFetchMarket(pair, timeframe, count);
-        // Save to in-memory cache
+        // Save to in-memory cache (1s for 1m timeframe)
         cache.set(cacheKey, { data: result, timestamp: Date.now() });
         return result;
       } finally {

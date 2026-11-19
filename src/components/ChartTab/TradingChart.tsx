@@ -39,6 +39,7 @@ interface TradingChartProps {
   supplyDemandZones: ChartZone[];
   spreadPips: number;
   currentPrice: number;
+  liveTick?: { midPrice: number; timestamp: number } | null;
   dataSource?: string;
   onPairChange: (pair: SupportedPair) => void;
   onTimeframeChange: (tf: Timeframe) => void;
@@ -74,6 +75,7 @@ export default function TradingChart({
   supplyDemandZones,
   spreadPips,
   currentPrice,
+  liveTick,
   dataSource = 'Simulator',
   onPairChange,
   onTimeframeChange,
@@ -91,6 +93,9 @@ export default function TradingChart({
   const userDrawingsRef = useRef<any[]>([]);
   const lastPairTfRef = useRef<string>('');
   const prevCandlesLengthRef = useRef<number>(0);
+  const lastBarTimeRef = useRef<number | null>(null);
+  const activeCandleRef = useRef<CandlestickData<Time> | null>(null);
+  const activeVolumeRef = useRef<HistogramData<Time> | null>(null);
 
   const [showIndicators, setShowIndicators] = useState(true);
   const [showLevels, setShowLevels] = useState(true);
@@ -333,7 +338,7 @@ export default function TradingChart({
     }
 
     // Incremental Real-Time Live Tick Injection vs Full Reset
-    if (isPairOrTfChange || isInitialLoad || Math.abs(candles.length - prevCandlesLengthRef.current) > 1) {
+    if (isPairOrTfChange || isInitialLoad || Math.abs(candles.length - prevCandlesLengthRef.current) > 2) {
       // Full dataset initialization on symbol/timeframe switch
       candleSeriesRef.current.setData(chartCandles);
       volumeSeriesRef.current.setData(chartVolumes);
@@ -343,39 +348,126 @@ export default function TradingChart({
       if (ema50SeriesRef.current) {
         ema50SeriesRef.current.setData(showIndicators ? ema50Data : []);
       }
+      lastBarTimeRef.current = Number(chartCandles[chartCandles.length - 1].time);
+      activeCandleRef.current = chartCandles[chartCandles.length - 1];
+      activeVolumeRef.current = chartVolumes[chartVolumes.length - 1];
       lastPairTfRef.current = currentKey;
     } else {
-      // Smooth real-time update: update latest candle and EMAs without reloading chart canvas
-      const latestCandle = chartCandles[chartCandles.length - 1];
-      const latestVolume = chartVolumes[chartVolumes.length - 1];
-      candleSeriesRef.current.update(latestCandle);
-      volumeSeriesRef.current.update(latestVolume);
+      // Periodic 45s sync: update latest candle and EMAs
+      const incomingLast = chartCandles[chartCandles.length - 1];
+      activeCandleRef.current = incomingLast;
+      activeVolumeRef.current = chartVolumes[chartVolumes.length - 1];
+      lastBarTimeRef.current = Number(incomingLast.time);
 
-      if (showIndicators) {
-        const lastEma20 = ema20Data[ema20Data.length - 1];
-        const lastEma50 = ema50Data[ema50Data.length - 1];
-        if (lastEma20 && ema20SeriesRef.current) ema20SeriesRef.current.update(lastEma20);
-        if (lastEma50 && ema50SeriesRef.current) ema50SeriesRef.current.update(lastEma50);
+      try {
+        candleSeriesRef.current.update(incomingLast);
+        volumeSeriesRef.current.update(chartVolumes[chartVolumes.length - 1]);
+      } catch {
+        candleSeriesRef.current.setData(chartCandles);
+        volumeSeriesRef.current.setData(chartVolumes);
       }
     }
 
     prevCandlesLengthRef.current = candles.length;
 
-    // Default legend to latest candle
+    // Default legend to latest candle with live price
     const last = candles[candles.length - 1];
+    const liveC = currentPrice > 0 ? currentPrice : last.close;
     const lastEma20 = ema20Values[ema20Values.length - 1];
     const lastEma50 = ema50Values[ema50Values.length - 1];
     setLegendData({
       o: last.open,
-      h: last.high,
-      l: last.low,
-      c: last.close,
+      h: Math.max(last.high, liveC),
+      l: Math.min(last.low, liveC),
+      c: liveC,
       v: last.volume,
       ema20: !isNaN(lastEma20) ? lastEma20 : undefined,
       ema50: !isNaN(lastEma50) ? lastEma50 : undefined,
-      isUp: last.close >= last.open,
+      isUp: liveC >= last.open,
     });
-  }, [candles, showIndicators, pair, timeframe]);
+  }, [candles, currentPrice, showIndicators, pair, timeframe]);
+
+  // 1-Second Real-Time Intra-Candle Live Tick Stream (Body & Wick Movement)
+  useEffect(() => {
+    if (!candleSeriesRef.current || !liveTick || !liveTick.midPrice || !activeCandleRef.current) return;
+
+    const midPrice = liveTick.midPrice;
+    const tickTimeSec = Math.floor(liveTick.timestamp / 1000);
+
+    // Determine timeframe interval in seconds
+    let intervalSec = 60; // default 1m
+    if (timeframe === '5m') intervalSec = 300;
+    else if (timeframe === '15m') intervalSec = 900;
+    else if (timeframe === '1h') intervalSec = 3600;
+    else if (timeframe === '4h') intervalSec = 14400;
+    else if (timeframe === '1d') intervalSec = 86400;
+
+    const prevBarTime = lastBarTimeRef.current ?? Number(activeCandleRef.current.time);
+    const currentBarIntervalStart = Math.floor(prevBarTime / intervalSec) * intervalSec;
+    const nowIntervalStart = Math.floor(tickTimeSec / intervalSec) * intervalSec;
+
+    let updatedCandle: CandlestickData<Time>;
+    let updatedVolume: HistogramData<Time>;
+
+    if (nowIntervalStart > currentBarIntervalStart) {
+      // Berganti menit/timeframe baru: buat candle baru
+      const newTime = nowIntervalStart as Time;
+      const prevClose = activeCandleRef.current.close;
+      updatedCandle = {
+        time: newTime,
+        open: prevClose,
+        high: Math.max(prevClose, midPrice),
+        low: Math.min(prevClose, midPrice),
+        close: midPrice,
+      };
+      updatedVolume = {
+        time: newTime,
+        value: 10,
+        color: updatedCandle.close >= updatedCandle.open ? 'rgba(63, 185, 80, 0.25)' : 'rgba(248, 81, 73, 0.25)',
+      };
+      lastBarTimeRef.current = nowIntervalStart;
+    } else {
+      // Masih dalam candle yang sama: gerakkan wick (high/low) dan body (close)
+      const cur = activeCandleRef.current;
+      updatedCandle = {
+        time: cur.time,
+        open: cur.open,
+        high: Math.max(cur.high, midPrice),
+        low: Math.min(cur.low, midPrice),
+        close: midPrice,
+      };
+      const curVol = activeVolumeRef.current;
+      updatedVolume = {
+        time: cur.time,
+        value: (curVol?.value || 10) + 1,
+        color: updatedCandle.close >= updatedCandle.open ? 'rgba(63, 185, 80, 0.25)' : 'rgba(248, 81, 73, 0.25)',
+      };
+    }
+
+    activeCandleRef.current = updatedCandle;
+    activeVolumeRef.current = updatedVolume;
+
+    try {
+      candleSeriesRef.current.update(updatedCandle);
+      if (volumeSeriesRef.current) {
+        volumeSeriesRef.current.update(updatedVolume);
+      }
+    } catch (err) {
+      // Safe catch
+    }
+
+    // Live update floating OHLC legend
+    setLegendData((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        h: Math.max(prev.h, midPrice),
+        l: Math.min(prev.l, midPrice),
+        c: midPrice,
+        isUp: midPrice >= prev.o,
+      };
+    });
+  }, [liveTick, timeframe]);
 
   // Update Trade Setup Price Lines (Entry, SL, TP 1, TP 2) with exact decimal precision
   useEffect(() => {
@@ -511,7 +603,9 @@ export default function TradingChart({
           {/* Active Data Source Provider Badge */}
           <div
             className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono font-medium border transition-all ${
-              dataSource === 'TwelveData'
+              dataSource.includes('Swissquote')
+                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30 shadow-glow-buy'
+                : dataSource === 'TwelveData'
                 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                 : dataSource === 'YahooFinance'
                 ? 'bg-sky-500/15 text-sky-400 border-sky-500/30'
@@ -523,7 +617,9 @@ export default function TradingChart({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                dataSource === 'TwelveData'
+                dataSource.includes('Swissquote')
+                  ? 'bg-emerald-400 animate-ping'
+                  : dataSource === 'TwelveData'
                   ? 'bg-emerald-400 shadow-glow-buy'
                   : dataSource === 'YahooFinance'
                   ? 'bg-sky-400 shadow-glow-blue'
@@ -535,7 +631,7 @@ export default function TradingChart({
             <span className="font-semibold">{dataSource}</span>
             <Tooltip
               term="Data Source"
-              explanation="Sistem Multi-Provider Auto-Failover: Twelve Data (Prioritas 1) -> Yahoo Finance (Prioritas 2 Gratis) -> FCS API (Prioritas 3) -> Realistic M1 Simulator (Prioritas 4)."
+              explanation="Sistem Live Multi-Provider: Swissquote Institutional Feed (Real-Time Bid/Ask 1 Detik) + Yahoo Finance Candle History -> FCS API -> Simulator."
             />
           </div>
         </div>

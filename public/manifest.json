@@ -1,0 +1,24 @@
+{
+  "name": "Trading Agent - Pro Institutional M1 Scalping & Journal",
+  "short_name": "TradingAgent",
+  "description": "AI Trading Agent Mobile-First dengan 6-Gate Institutional Filter, KLineChart, Kalender Berita, dan Jurnal Trading",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0D1117",
+  "theme_color": "#161B22",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

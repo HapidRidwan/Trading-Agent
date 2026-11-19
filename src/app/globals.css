@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 9 11 16;
+    --font-jakarta: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-jetbrains: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    background-color: #090B10;
+    color: #E6EDF3;
+    font-family: var(--font-jakarta);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom Scrollbar for Sleek Financial Look */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #090B10;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1D232F;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2D3546;
+}
+
+/* Mobile Safe Area Padding */
+.pb-safe {
+  padding-bottom: calc(6.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+
+.animate-shake {
+  animation: shake 0.4s ease-in-out;
+}
